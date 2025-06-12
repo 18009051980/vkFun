@@ -1,0 +1,92 @@
+#version 450
+
+struct Node{
+    uint next;
+    float depth;
+    float color[4];
+};
+
+layout (binding = 0, r32ui) uniform uimage2D headImage;
+layout (std430, binding = 1) buffer LinkList{
+    Node inNodes[];
+};
+layout (binding = 2) uniform sampler2D opaueColorImage;
+layout (binding = 3, rgba8) uniform image2D  outImage;
+layout (binding = 4) uniform sampler2D opaueDepthImage;
+layout (binding = 5) uniform UBO
+{
+    mat4 mvp;
+    ivec4 viewport;
+    
+}ubo;
+
+layout (local_size_x = 16, local_size_Y = 16, local_size_z = 1) in;
+
+void swap(inout float a, inout float b)
+{
+    float temp = a;
+    a = b;
+    b = temp;
+}
+    
+// Gamma校正参数（sRGB标准 gamma=2.2）
+const float GAMMA = 2.2;
+const float INV_GAMMA = 1.0 / GAMMA;
+
+// 将sRGB颜色转换到线性空间
+vec3 srgbToLinear(vec3 srgb) {
+    return pow(srgb, vec3(GAMMA));
+}
+// 将线性颜色转换回sRGB空间
+vec3 linearToSrgb(vec3 linear) {
+    return pow(linear, vec3(INV_GAMMA));
+}
+void main()
+{
+    vec2 uv = vec2(float(gl_GlobalInvocationID.x) / ubo.viewport[2], float(gl_GlobalInvocationID.y) / ubo.viewport[3]);
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    uint head = imageLoad(headImage, pixelCoord).x;
+    
+    if(head == 0xffffffff)
+    {
+        vec4 color = texture(opaueColorImage, uv);
+        color.rgb = linearToSrgb(color.rgb); // 转换到线性空间
+        imageStore(outImage, pixelCoord, color);
+        return;
+    }
+    
+    uint maxNode = head;
+    uint next = inNodes[head].next;
+    for (;next != 0xffffffff ; )
+    {
+        for (; next != 0xffffffff; next = inNodes[next].next)
+        {
+            if (inNodes[next].depth > inNodes[maxNode].depth)
+            {
+                maxNode = next;
+            }
+        }
+        if (maxNode != head)
+        {
+            swap(inNodes[maxNode].depth, inNodes[head].depth);
+            swap(inNodes[maxNode].color[0], inNodes[head].color[0]);
+            swap(inNodes[maxNode].color[1], inNodes[head].color[1]);
+            swap(inNodes[maxNode].color[2], inNodes[head].color[2]);
+            swap(inNodes[maxNode].color[3], inNodes[head].color[3]);
+        }
+        head = inNodes[head].next;
+        next = inNodes[head].next;
+    }
+    
+    head = imageLoad(headImage, pixelCoord).x;
+
+    vec4 targetColor = texture(opaueColorImage, uv);
+    float depth = texture(opaueDepthImage, uv).x;
+    while (head != 0xffffffff)
+    {
+        targetColor = mix(targetColor, vec4(inNodes[head].color[0], inNodes[head].color[1], inNodes[head].color[2], inNodes[head].color[3]), inNodes[head].color[3]);
+        head = inNodes[head].next;
+    }
+    targetColor.rgb = linearToSrgb(targetColor.rgb);
+    imageStore(outImage, pixelCoord, targetColor);
+}

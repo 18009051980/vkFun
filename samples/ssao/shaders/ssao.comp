@@ -1,0 +1,27 @@
+#version 450
+
+layout (binding = 0, rgba32f) readonly uniform image2D positionImage;
+layout (binding = 1, rgba32f) readonly uniform image2D normalImage;
+layout (binding = 2, r32f) readonly uniform image2D depthImage;
+layout (binding = 3, rgba32f) writeonly uniform image2D outImage;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Gamma校正参数（sRGB标准 gamma=2.2）
+const float GAMMA = 2.2;
+const float INV_GAMMA = 1.0 / GAMMA;
+
+// 将sRGB颜色转换到线性空间
+vec3 srgbToLinear(vec3 srgb) {
+    return pow(srgb, vec3(GAMMA));
+}
+// 将线性颜色转换回sRGB空间
+vec3 linearToSrgb(vec3 linear) {
+    return pow(linear, vec3(INV_GAMMA));
+}
+
+
+void main()
+{
+    
+}
