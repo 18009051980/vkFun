@@ -62,7 +62,7 @@ private:
     void updateUniformBuffer();
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
-    void createGraphicsPipeline();
+    void createPipelines();
 
     void createColorResources() override;
     void cleanupColorResources() override;
@@ -73,6 +73,7 @@ private:
     VkRenderPass m_renderPass;
     
     VkPipeline m_pipeline;
+    VkPipeline m_ssaoPipeline;
     VkDescriptorSetLayout m_descriptorSetLayout;
     VkDescriptorSetLayout m_ssaoDescriptorSetLayout;
     VkPipelineLayout m_pipelineLayout;
@@ -119,4 +120,7 @@ private:
     std::array<VkDeviceMemory, m_framesInFlight> m_normalImageMemory;
     std::array<VkImageView, m_framesInFlight> m_normalImageView;
 
+    std::array<VkCommandBuffer, m_framesInFlight> m_ssaoCommandBuffers;
+    std::array<VkFence, m_framesInFlight> m_ssaoFence;
+    std::array<VkSemaphore, m_framesInFlight> m_ssaoSemaphore;
 };

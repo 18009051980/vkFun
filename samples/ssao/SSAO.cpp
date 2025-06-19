@@ -37,7 +37,7 @@ void SSAO::init()
 
     createRenderPass();
     
-    createGraphicsPipeline();
+    createPipelines();
 
 
     createCommandBuffer();
@@ -67,7 +67,33 @@ void SSAO::init()
 
     allocateDescriptorSets();
 
-    
+    VkCommandBuffer commandBuffer;
+    VkCommandBufferAllocateInfo info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = m_commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    vkAllocateCommandBuffers(m_logicDevice, &info, &commandBuffer);
+    startCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    for (size_t i = 0; i < m_swapchainsImages.size(); i++)
+    {
+        this->transitionImageLayout(commandBuffer, m_swapchainsImages[i], m_format, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 1);
+    }
+    endOneTimeCommandBuffer(commandBuffer, m_graphicsAndComputeQueue);
+
+    VkFenceCreateInfo fenceInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    VkSemaphoreCreateInfo semaphoreInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+    for (size_t i = 0; i < m_framesInFlight; i++)
+    {
+        vkCreateFence(m_logicDevice, &fenceInfo, nullptr, &m_ssaoFence[i]);
+        vkCreateSemaphore(m_logicDevice, &semaphoreInfo, nullptr, &m_ssaoSemaphore[i]);
+    }
 
 }
 
@@ -112,6 +138,16 @@ void SSAO::clean()
         vkDestroyPipelineLayout(m_logicDevice, m_pipelineLayout, nullptr);
 
         vkDestroyRenderPass(m_logicDevice, m_renderPass, nullptr);
+
+        vkDestroyDescriptorSetLayout(m_logicDevice, m_ssaoDescriptorSetLayout, nullptr);
+        vkDestroyPipeline(m_logicDevice, m_ssaoPipeline, nullptr);
+        vkDestroyPipelineLayout(m_logicDevice, m_ssaoPipelineLayout, nullptr);
+
+        for (size_t i = 0; i < m_framesInFlight; i++)
+        {
+            vkDestroyFence(m_logicDevice, m_ssaoFence[i], nullptr);
+            vkDestroySemaphore(m_logicDevice, m_ssaoSemaphore[i], nullptr);
+        }
     }
     
     
@@ -376,7 +412,7 @@ void SSAO::createUniformBuffer()
 }
 
 
-void SSAO::createGraphicsPipeline()
+void SSAO::createPipelines()
 {
     auto vertShaderCode = readFile("ssao.vert.spv");
     auto fragShaderCode = readFile("ssao.frag.spv");
@@ -471,8 +507,31 @@ void SSAO::createGraphicsPipeline()
     dynamicStateInfo.dynamicStateCount = (uint32_t)dynamicStates.size();
     dynamicStateInfo.pDynamicStates = dynamicStates.data();
 
-    
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthCreateInfo; 
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicStateInfo;
+    pipelineInfo.layout = m_pipelineLayout;
+    pipelineInfo.renderPass = m_renderPass;
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+    pipelineInfo.basePipelineIndex = -1; // Optional
 
+    if (vkCreateGraphicsPipelines(m_logicDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) 
+    {
+        throw std::runtime_error("failed to create graphics pipeline!");
+    }
+
+    vkDestroyShaderModule(m_logicDevice, vertShaderModule, nullptr);
+    vkDestroyShaderModule(m_logicDevice, fragShaderModule, nullptr);
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -499,6 +558,26 @@ void SSAO::createGraphicsPipeline()
 
     vkDestroyShaderModule(m_logicDevice, vertShaderModule, nullptr);
     vkDestroyShaderModule(m_logicDevice, fragShaderModule, nullptr);
+
+
+    auto ssaoShaderCode = readFile("ssao.comp.spv");
+    auto ssaoShaderModule = createShaderModule(ssaoShaderCode);
+
+    VkPipelineShaderStageCreateInfo ssaoCompStage{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = ssaoShaderModule,
+        .pName = "main",
+    };
+
+    VkComputePipelineCreateInfo ssaoCompInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = ssaoCompStage,
+        .layout = m_ssaoPipelineLayout,
+    };
+    vkCreateComputePipelines(m_logicDevice, VK_NULL_HANDLE, 1, &ssaoCompInfo, nullptr, &m_ssaoPipeline);
+
+    vkDestroyShaderModule(m_logicDevice, ssaoShaderModule, nullptr);
 }
 
 
@@ -513,6 +592,11 @@ void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageInde
     {
         throw std::runtime_error("failed to begin recording command buffer!");
     }
+    
+    this->transitionImageLayout(commandBuffer, m_positionImage, m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1);
+    this->transitionImageLayout(commandBuffer, m_normalImage, m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1);
+    this->transitionImageLayout(commandBuffer, m_depthImage, m_GBufferImageFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 1);
+
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = m_renderPass;
@@ -547,11 +631,9 @@ void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageInde
     updateUniformBuffer();
 
     VkViewport viewport{0.f, 0.f, (float)m_extent.width, (float)m_extent.height, 0.f, 1.f};
-
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
     VkRect2D scissor{{0, 0}, m_extent};
-
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_curFrame], 0, nullptr);
@@ -565,6 +647,18 @@ void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageInde
         throw std::runtime_error("failed to record command buffer!");
     }
 
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_commandBuffers[m_curFrame];
+
+    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_curFrame]};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    if (vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, m_inFlightFence[m_curFrame]) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit draw command buffer!");
+    }
 }
 
 
@@ -605,30 +699,12 @@ void SSAO::drawFrame()
     vkResetCommandBuffer(m_commandBuffers[m_curFrame], 0);
     recordCommandBuffer(m_commandBuffers[m_curFrame], imageIndex);
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {m_imageAvailabelesemaphores[m_curFrame]};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &m_commandBuffers[m_curFrame];
-
-    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_curFrame]};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    if (vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, m_inFlightFence[m_curFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("failed to submit draw command buffer!");
-    }
+    recordComputeCommandBuffer(imageIndex);
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
+    presentInfo.pWaitSemaphores = &m_ssaoSemaphore[m_curFrame];
 
     VkSwapchainKHR swapChains[] = {m_swapchain};
     presentInfo.swapchainCount = 1;
@@ -640,7 +716,6 @@ void SSAO::drawFrame()
     if (VK_ERROR_OUT_OF_DATE_KHR == ret || VK_SUBOPTIMAL_KHR == ret)
     {
         recreateSwapchain();
-        
     }
     m_curFrame = (m_curFrame + 1) & 1;
 }
@@ -769,6 +844,8 @@ void SSAO::createCommandBuffer()
     {
         throw std::runtime_error("failed to allocate command buffers!");
     }
+
+    vkAllocateCommandBuffers(m_logicDevice, &allocInfo, m_ssaoCommandBuffers.data());
 }
 
 
@@ -993,4 +1070,64 @@ void SSAO::createSSAOPipelineLayout()
         .pSetLayouts = &m_ssaoDescriptorSetLayout,
     };
     vkCreatePipelineLayout(m_logicDevice, &info, nullptr, &m_ssaoPipelineLayout);
+}
+
+
+void SSAO::recordComputeCommandBuffer(uint32_t imageIndex)
+{
+    vkWaitForFences(m_logicDevice, 1, &m_ssaoFence[m_curFrame], VK_TRUE, UINT32_MAX);
+    vkResetFences(m_logicDevice, 1, &m_ssaoFence[m_curFrame]);
+    VkCommandBufferBeginInfo info{
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    };
+
+    VkDescriptorImageInfo outImageInfo{
+        .imageView = m_imageViews[imageIndex],
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    std::vector writes{
+        VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = m_ssaoDescriptorSets[m_curFrame],
+            .dstBinding = 3,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo = &outImageInfo,
+        }
+    };
+
+    vkUpdateDescriptorSets(m_logicDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    vkBeginCommandBuffer(m_ssaoCommandBuffers[m_curFrame], &info);
+
+    this->transitionImageLayout(m_ssaoCommandBuffers[m_curFrame], m_swapchainsImages[imageIndex], m_format, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL, 1);
+
+    vkCmdBindDescriptorSets(m_ssaoCommandBuffers[m_curFrame], VK_PIPELINE_BIND_POINT_COMPUTE, m_ssaoPipelineLayout, 0, 1, &m_ssaoDescriptorSets[m_curFrame], 0, nullptr);
+
+    vkCmdBindPipeline(m_ssaoCommandBuffers[m_curFrame], VK_PIPELINE_BIND_POINT_COMPUTE, m_ssaoPipeline);
+
+    vkCmdDispatch(m_ssaoCommandBuffers[m_curFrame], m_extent.width / 16, m_extent.width / 16, 1);
+
+    this->transitionImageLayout(m_ssaoCommandBuffers[m_curFrame], m_swapchainsImages[imageIndex], m_format, VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 1);
+
+    vkEndCommandBuffer(m_ssaoCommandBuffers[m_curFrame]);
+
+    std::vector semaphores{
+        m_renderFinishedSemaphores[m_curFrame],
+        m_imageAvailabelesemaphores[m_curFrame],
+    };
+    VkPipelineStageFlags waitDstStage{VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
+    VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = static_cast<uint32_t>(semaphores.size()),
+        .pWaitSemaphores = semaphores.data(),
+        .pWaitDstStageMask = &waitDstStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &m_ssaoCommandBuffers[m_curFrame],
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &m_ssaoSemaphore[m_curFrame],
+    };
+    vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, m_ssaoFence[m_curFrame]);
+
 }
