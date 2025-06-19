@@ -40,7 +40,9 @@ private:
     void createDepthImage() override;
 
     void createDescriptorSetLayout();
+    void createSSAODescriptorSetLayout();
     void createPipelineLayout();
+    void createSSAOPipelineLayout();
 
     void createRenderPass();
 
@@ -64,9 +66,9 @@ private:
 
     void createColorResources() override;
     void cleanupColorResources() override;
-
-
 private:
+    inline static constexpr uint8_t m_framesInFlight = 2; 
+
     std::vector<VkFramebuffer> m_framebuffers;
     VkRenderPass m_renderPass;
     
@@ -83,23 +85,24 @@ private:
     VkBuffer m_indexBuffer;
     VkDeviceMemory m_indexBufferMemory;
 
-    std::vector<VkBuffer> m_matrixBuffers;
-    std::vector<VkDeviceMemory> m_matrixBuffersMemory;
-    std::vector<void *> m_matrixBuffersMapped;
+    std::vector<VkBuffer> m_matrixBuffers{m_framesInFlight};
+    std::vector<VkDeviceMemory> m_matrixBuffersMemory{m_framesInFlight};
+    std::vector<void *> m_matrixBuffersMapped{m_framesInFlight};
 
-    std::vector<VkBuffer> m_timeBuffers;
-    std::vector<VkDeviceMemory> m_timeBuffersMemory;
-    std::vector<void *> m_timeBuffersMapped;
+    std::vector<VkBuffer> m_timeBuffers{m_framesInFlight};
+    std::vector<VkDeviceMemory> m_timeBuffersMemory{m_framesInFlight};
+    std::vector<void *> m_timeBuffersMapped{m_framesInFlight};
 
     VkDescriptorPool m_descriptorPool;
     std::vector<VkDescriptorSet> m_descriptorSets;
 
     VkSampler m_textureSampler;
 
-    VkImage m_depthImage;
-    VkDeviceMemory m_depthImageMemory;
-    VkImageView m_depthImageView;
-
+    std::vector<VkImage> m_depthImage{m_framesInFlight};
+    std::vector<VkDeviceMemory> m_depthImageMemory{m_framesInFlight};
+    std::vector<VkImageView> m_depthImageView{m_framesInFlight};
+    VkSampler m_depthSampler;           //depthImage cant be used as image_usage_storage_image
+    
     VkImage m_vikingroomImage;
     VkDeviceMemory m_vikingroomImageMemory;
     VkImageView m_vikingroomImageView;
@@ -108,12 +111,12 @@ private:
     std::vector<MyVertex> m_vertices;
     std::vector<uint32_t> m_indices;
 
-    VkImage m_positionImage;
-    VkDeviceMemory m_positionImageMemory;
-    VkImageView m_positionImageView;
+    std::array<VkImage, m_framesInFlight> m_positionImage;
+    std::array<VkDeviceMemory, m_framesInFlight> m_positionImageMemory;
+    std::array<VkImageView, m_framesInFlight> m_positionImageView;
 
-    VkImage m_normalImage;
-    VkDeviceMemory m_normalImageMemory;
-    VkImageView m_normalImageView;
+    std::array<VkImage, m_framesInFlight> m_normalImage;
+    std::array<VkDeviceMemory, m_framesInFlight> m_normalImageMemory;
+    std::array<VkImageView, m_framesInFlight> m_normalImageView;
 
 };

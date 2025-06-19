@@ -30,8 +30,10 @@ void SSAO::loadModel(const char* filename)
 void SSAO::init()
 {
     createDescriptorSetLayout();
-
     createPipelineLayout();
+
+    createSSAODescriptorSetLayout();
+    createSSAOPipelineLayout();
 
     createRenderPass();
     
@@ -49,6 +51,7 @@ void SSAO::init()
     createDescriptorPool();
     
     createDepthImage();
+    createTextureSampler(m_depthSampler);
 
     createColorResources();
 
@@ -318,12 +321,16 @@ void SSAO::createDescriptorPool()
     std::vector<VkDescriptorPoolSize> poolSizes{
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 4,
+            .descriptorCount = 4,   //matrix buffer, timebuffer
         },
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 2,
+            .descriptorCount = 2 + 2, //modelImage, ssao depthImage
         },
+        VkDescriptorPoolSize{
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 6,    //ssao positionImage, normalImage, outpuImage
+        }
     };
 
     VkDescriptorPoolCreateInfo poolInfo{
@@ -725,13 +732,13 @@ void SSAO::createRenderPass()
 
 void SSAO::createFramebuffers()
 {
-    m_framebuffers.resize(m_imageViews.size());
-    for (size_t i = 0; i < m_imageViews.size(); i++) 
+    m_framebuffers.resize(m_depthImageView.size());
+    for (size_t i = 0; i < m_depthImageView.size(); i++) 
     {
         std::vector<VkImageView> attachments = {
-            m_depthImageView,
-            m_positionImageView,
-            m_normalImageView,
+            m_depthImageView[i],
+            m_positionImageView[i],
+            m_normalImageView[i],
         };
 
         VkFramebufferCreateInfo framebufferInfo{};
@@ -834,82 +841,99 @@ void SSAO::createTextureImage(const char* filename, VkImage &image, VkDeviceMemo
 void SSAO::createDepthImage()
 {
     VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
-    createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT , VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
+    for (size_t i = 0; i < 2; i++)
+    {
+        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT , VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage[i], m_depthImageMemory[i]);
+        m_depthImageView[i] = createImageView(m_depthImage[i], depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+    }
+    
 
-    m_depthImageView = createImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+    
     VkCommandBuffer commandBuffer;
     allocateCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
     startCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
-
-    transitionImageLayout(
-        commandBuffer,
-        m_depthImage, depthFormat, 
-        VK_IMAGE_ASPECT_DEPTH_BIT,
-        0, 
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT  | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, 
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        1);
-
+    for (size_t i = 0; i < m_depthImage.size(); i++)
+    {
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImage[i], depthFormat, 
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            0, 
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT  | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, 
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            1);
+    }
     endOneTimeCommandBuffer(commandBuffer, m_graphicsAndComputeQueue);
 }
 
 
 void SSAO::cleanupDepthImage()
 {
-    vkDestroyImageView(m_logicDevice, m_depthImageView, nullptr);
-    vkDestroyImage(m_logicDevice, m_depthImage, nullptr);
-    vkFreeMemory(m_logicDevice, m_depthImageMemory, nullptr);
+    for (size_t i = 0; i < m_depthImage.size(); i++)
+    {
+        vkDestroyImageView(m_logicDevice, m_depthImageView[i], nullptr);
+        vkDestroyImage(m_logicDevice, m_depthImage[i], nullptr);
+        vkFreeMemory(m_logicDevice, m_depthImageMemory[i], nullptr);
+    }
 }
 
 void SSAO::createColorResources()
 {
-    createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_positionImage, m_positionImageMemory);
+    for (size_t i = 0; i < m_positionImage.size(); i++)
+    {
+        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_positionImage[i], m_positionImageMemory[i]);
 
-    m_positionImageView = createImageView(m_positionImage, m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        m_positionImageView[i] = createImageView(m_positionImage[i], m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 
-    createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_normalImage, m_normalImageMemory);
-    m_normalImageView = createImageView(m_normalImage, m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
-
+        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_normalImage[i], m_normalImageMemory[i]);
+        m_normalImageView[i] = createImageView(m_normalImage[i], m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    }
+    
     VkCommandBuffer commandBuffer;
     allocateCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
     startCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
 
-    transitionImageLayout(
-        commandBuffer,
-        m_positionImage, m_GBufferImageFormat, 
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        0, 
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT  | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, 
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
-        1);
-    transitionImageLayout(
-        commandBuffer,
-        m_normalImage, m_GBufferImageFormat, 
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        0, 
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT  | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, 
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
-        1);
-
+    for (size_t i = 0; i < m_positionImage.size(); i++)
+    {
+        transitionImageLayout(
+            commandBuffer,
+            m_positionImage[i], m_GBufferImageFormat, 
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0, 
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT  | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, 
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
+            1);
+        transitionImageLayout(
+            commandBuffer,
+            m_normalImage[i], m_GBufferImageFormat, 
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0, 
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT  | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, 
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
+            1);
+    }
     endOneTimeCommandBuffer(commandBuffer, m_graphicsAndComputeQueue);
 }
 
 void SSAO::cleanupColorResources()
 {
-    vkDestroyImageView(m_logicDevice, m_positionImageView, nullptr);
-    vkDestroyImage(m_logicDevice, m_positionImage, nullptr);
-    vkFreeMemory(m_logicDevice, m_positionImageMemory, nullptr);
+    for (size_t i = 0; i < m_framesInFlight; i++)
+    {
+        vkDestroyImageView(m_logicDevice, m_positionImageView[i], nullptr);
+        vkDestroyImage(m_logicDevice, m_positionImage[i], nullptr);
+        vkFreeMemory(m_logicDevice, m_positionImageMemory[i], nullptr);
 
-    vkDestroyImageView(m_logicDevice, m_normalImageView, nullptr);
-    vkDestroyImage(m_logicDevice, m_normalImage, nullptr);
-    vkFreeMemory(m_logicDevice, m_normalImageMemory, nullptr);
+        vkDestroyImageView(m_logicDevice, m_normalImageView[i], nullptr);
+        vkDestroyImage(m_logicDevice, m_normalImage[i], nullptr);
+        vkFreeMemory(m_logicDevice, m_normalImageMemory[i], nullptr);
+    }
 }
 
 void SSAO::createPipelineLayout()
@@ -922,4 +946,51 @@ void SSAO::createPipelineLayout()
     if (vkCreatePipelineLayout(m_logicDevice, &pipelineLayoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("failed to create pipeline layout!");
     }
+}
+
+void SSAO::createSSAODescriptorSetLayout()
+{
+    std::vector<VkDescriptorSetLayoutBinding> bindings{
+        VkDescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        VkDescriptorSetLayoutBinding{
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        VkDescriptorSetLayoutBinding{
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        VkDescriptorSetLayoutBinding{
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    };
+    VkDescriptorSetLayoutCreateInfo ssaoDescriptorSetLayoutInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = static_cast<uint32_t>(bindings.size()),
+        .pBindings = bindings.data(),
+    };
+    
+    vkCreateDescriptorSetLayout(m_logicDevice, &ssaoDescriptorSetLayoutInfo, nullptr, &m_ssaoDescriptorSetLayout);   
+}
+
+void SSAO::createSSAOPipelineLayout()
+{
+    VkPipelineLayoutCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &m_ssaoDescriptorSetLayout,
+    };
+    vkCreatePipelineLayout(m_logicDevice, &info, nullptr, &m_ssaoPipelineLayout);
 }
