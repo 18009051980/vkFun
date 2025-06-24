@@ -27,6 +27,7 @@ private:
     bool tick(float delta) override; 
 
 private:
+
     void cleanupFramebuffers() override
     {
         for (int i = 0; i < m_framebuffers.size(); ++i)
@@ -58,14 +59,22 @@ private:
 
     void createUniformBuffer();
     void allocateDescriptorSets();
+    void allocateSSAODescriptorSets();
+    void updateSSAOInputDescriptorSetBindings();
+    void updateSSAOOutputDescriptorSetBindings(int imageIndex);
 
     void updateUniformBuffer();
 
-    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
+    void recordRenderCommandBufferAndSubmit(VkCommandBuffer commandBuffer);
     void createGraphicsPipeline();
 
+    void createSSAOPipeline();
     void createColorResources() override;
     void cleanupColorResources() override;
+
+    void recordSSAOCommandBuffer(int imageIndex);
+
+    void createSemaphores();
 private:
     inline static constexpr uint8_t m_framesInFlight = 2; 
 
@@ -73,12 +82,14 @@ private:
     VkRenderPass m_renderPass;
     
     VkPipeline m_pipeline;
+    VkPipeline m_ssaoPipeline;
     VkDescriptorSetLayout m_descriptorSetLayout;
     VkDescriptorSetLayout m_ssaoDescriptorSetLayout;
     VkPipelineLayout m_pipelineLayout;
     VkPipelineLayout m_ssaoPipelineLayout;
 
     std::vector<VkCommandBuffer> m_commandBuffers;
+    std::array<VkCommandBuffer, m_framesInFlight> m_ssaoCommandBuffer;
 
     VkBuffer m_vertexBuffer;
     VkDeviceMemory m_vertexBufferMemory;
@@ -95,7 +106,7 @@ private:
 
     VkDescriptorPool m_descriptorPool;
     std::vector<VkDescriptorSet> m_descriptorSets;
-
+    std::array<VkDescriptorSet, m_framesInFlight> m_ssaoDescriptorSets;
     VkSampler m_textureSampler;
 
     std::vector<VkImage> m_depthImage{m_framesInFlight};
@@ -119,4 +130,5 @@ private:
     std::array<VkDeviceMemory, m_framesInFlight> m_normalImageMemory;
     std::array<VkImageView, m_framesInFlight> m_normalImageView;
 
+    std::array<VkSemaphore, m_framesInFlight> m_ssaoFinishedSemaphores;
 };

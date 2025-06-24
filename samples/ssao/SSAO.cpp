@@ -25,37 +25,6 @@ void SSAO::loadModel(const char* filename)
 {
     ObjLoader objLoader;
     objLoader.load(filename, m_vertices, m_indices);
-}
-
-void SSAO::init()
-{
-    createDescriptorSetLayout();
-    createPipelineLayout();
-
-    createSSAODescriptorSetLayout();
-    createSSAOPipelineLayout();
-
-    createRenderPass();
-    
-    createGraphicsPipeline();
-
-
-    createCommandBuffer();
-
-    loadModel("assets/objs/viking_room.obj");
-
-    createVertexBuffer(m_vertices);
-    createIndexBuffer(m_indices);
-    createUniformBuffer();
-
-    createDescriptorPool();
-    
-    createDepthImage();
-    createTextureSampler(m_depthSampler);
-
-    createColorResources();
-
-    createFramebuffers();
 
     int width = 0;
     int height = 0;
@@ -64,11 +33,54 @@ void SSAO::init()
     m_vikingroomImageView = createImageView(m_vikingroomImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, m_mipmapLevels);
     
     createTextureSampler(m_textureSampler);
+}
 
+void SSAO::init()
+{
+    loadModel("assets/objs/viking_room.obj");
+
+    createDescriptorSetLayout();
+    createPipelineLayout();
+
+    createSSAODescriptorSetLayout();
+    createSSAOPipelineLayout();
+
+    createUniformBuffer();
+
+    createDescriptorPool();
     allocateDescriptorSets();
+    allocateSSAODescriptorSets();
+
+    createRenderPass();
+    
+    createGraphicsPipeline();
+    createSSAOPipeline();
+
+    createCommandBuffer();
+
+
+    createVertexBuffer(m_vertices);
+    createIndexBuffer(m_indices);
 
     
+    createDepthImage();
+    createTextureSampler(m_depthSampler);
 
+    createColorResources();
+
+    createFramebuffers();
+
+    createSemaphores();
+
+    VkCommandBuffer commandBuffer;
+    allocateCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    startCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    for (size_t i = 0; i < m_swapchainsImages.size(); i++)
+    {
+        transitionImageLayout(commandBuffer, m_swapchainsImages[i], m_format,   VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_ACCESS_SHADER_WRITE_BIT,     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 1);
+    }
+    endOneTimeCommandBuffer(commandBuffer, m_graphicsAndComputeQueue);
+    
 }
 
 void SSAO::clean()
@@ -314,7 +326,99 @@ void SSAO::allocateDescriptorSets()
     vkUpdateDescriptorSets(m_logicDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 }
 
+void SSAO::allocateSSAODescriptorSets()
+{
+    std::array<VkDescriptorSetLayout, m_framesInFlight> layouts{
+        m_ssaoDescriptorSetLayout,
+        m_ssaoDescriptorSetLayout,
+    };
+    VkDescriptorSetAllocateInfo info{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = m_descriptorPool,
+        .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
+        .pSetLayouts = layouts.data(),
+    };
 
+    vkAllocateDescriptorSets(m_logicDevice, &info, m_ssaoDescriptorSets.data());
+}
+
+void SSAO::updateSSAOInputDescriptorSetBindings()
+{
+    std::vector<VkWriteDescriptorSet> writes;
+    for (size_t i = 0; i < m_framesInFlight; i++)
+    {
+        VkDescriptorImageInfo positionImageInfo{
+            .imageView = m_positionImageView[i],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        writes.emplace_back(
+            VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = m_ssaoDescriptorSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &positionImageInfo,
+            }
+        );
+
+        VkDescriptorImageInfo normalImageInfo{
+            .imageView = m_normalImageView[i],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        writes.emplace_back(
+            VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = m_ssaoDescriptorSets[i],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &normalImageInfo,
+            }
+        );
+
+        VkDescriptorImageInfo depthImageInfo{
+            .sampler = m_depthSampler,
+            .imageView = m_depthImageView[i],
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        writes.emplace_back(
+            VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = m_ssaoDescriptorSets[i],
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &depthImageInfo,
+            }
+        );
+    }
+
+    vkUpdateDescriptorSets(m_logicDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+}
+
+void SSAO::updateSSAOOutputDescriptorSetBindings(int imageIndex)
+{
+    VkDescriptorImageInfo outputImageInfo{
+        .imageView = m_imageViews[imageIndex],
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+
+    VkWriteDescriptorSet write{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = m_ssaoDescriptorSets[m_curFrame],
+        .dstBinding = 3,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &outputImageInfo,
+    };
+    vkUpdateDescriptorSets(m_logicDevice, 1, &write, 0, nullptr);
+    
+}
 
 void SSAO::createDescriptorPool()
 {
@@ -335,11 +439,10 @@ void SSAO::createDescriptorPool()
 
     VkDescriptorPoolCreateInfo poolInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 2,
+        .maxSets = 2 + 2,           // renderDescriptorsets[2] , ssaoDescriptorSets[2] 
         .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
         .pPoolSizes = poolSizes.data(),
     };
-
 
     if (VK_SUCCESS != vkCreateDescriptorPool(m_logicDevice, &poolInfo, nullptr, & m_descriptorPool))
     {
@@ -502,7 +605,7 @@ void SSAO::createGraphicsPipeline()
 }
 
 
-void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
+void SSAO::recordRenderCommandBufferAndSubmit(VkCommandBuffer commandBuffer)
 {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -516,7 +619,7 @@ void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageInde
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = m_renderPass;
-    renderPassInfo.framebuffer = m_framebuffers[imageIndex];
+    renderPassInfo.framebuffer = m_framebuffers[m_curFrame];
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = m_extent;
 
@@ -565,6 +668,24 @@ void SSAO::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageInde
         throw std::runtime_error("failed to record command buffer!");
     }
 
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = {m_imageAvailabelesemaphores[m_curFrame]};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_commandBuffers[m_curFrame];
+
+    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_curFrame]};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    if (vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit draw command buffer!");
+    }
 }
 
 
@@ -603,32 +724,16 @@ void SSAO::drawFrame()
     }
 
     vkResetCommandBuffer(m_commandBuffers[m_curFrame], 0);
-    recordCommandBuffer(m_commandBuffers[m_curFrame], imageIndex);
+    recordRenderCommandBufferAndSubmit(m_commandBuffers[m_curFrame]);
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {m_imageAvailabelesemaphores[m_curFrame]};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &m_commandBuffers[m_curFrame];
-
-    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_curFrame]};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    if (vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, m_inFlightFence[m_curFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("failed to submit draw command buffer!");
-    }
+    vkResetCommandBuffer(m_ssaoCommandBuffer[m_curFrame], 0);
+    recordSSAOCommandBuffer(imageIndex);
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
+    presentInfo.pWaitSemaphores = &m_ssaoFinishedSemaphores[m_curFrame];
 
     VkSwapchainKHR swapChains[] = {m_swapchain};
     presentInfo.swapchainCount = 1;
@@ -754,6 +859,8 @@ void SSAO::createFramebuffers()
             throw std::runtime_error("failed to create framebuffer!");
         }
     }
+
+    updateSSAOInputDescriptorSetBindings();
 }
 
 void SSAO::createCommandBuffer()
@@ -769,6 +876,7 @@ void SSAO::createCommandBuffer()
     {
         throw std::runtime_error("failed to allocate command buffers!");
     }
+    vkAllocateCommandBuffers(m_logicDevice, &allocInfo, m_ssaoCommandBuffer.data());
 }
 
 
@@ -884,11 +992,11 @@ void SSAO::createColorResources()
 {
     for (size_t i = 0; i < m_positionImage.size(); i++)
     {
-        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_positionImage[i], m_positionImageMemory[i]);
+        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_positionImage[i], m_positionImageMemory[i]);
 
         m_positionImageView[i] = createImageView(m_positionImage[i], m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 
-        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_normalImage[i], m_normalImageMemory[i]);
+        createImage(m_extent.width, m_extent.height, 1, VK_SAMPLE_COUNT_1_BIT, m_GBufferImageFormat, VK_IMAGE_TILING_OPTIMAL,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_normalImage[i], m_normalImageMemory[i]);
         m_normalImageView[i] = createImageView(m_normalImage[i], m_GBufferImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
     }
     
@@ -993,4 +1101,157 @@ void SSAO::createSSAOPipelineLayout()
         .pSetLayouts = &m_ssaoDescriptorSetLayout,
     };
     vkCreatePipelineLayout(m_logicDevice, &info, nullptr, &m_ssaoPipelineLayout);
+}
+void SSAO::recordSSAOCommandBuffer(int imageIndex)
+{
+    auto &commandBuffer = m_ssaoCommandBuffer[m_curFrame];
+
+    VkCommandBufferBeginInfo info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+    };
+
+    vkBeginCommandBuffer(commandBuffer, &info);
+    updateSSAOOutputDescriptorSetBindings(imageIndex);
+
+    transitionImageLayout(commandBuffer, m_swapchainsImages[imageIndex], m_format, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL, 1);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_positionImage[m_curFrame], m_GBufferImageFormat, 
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 
+        VK_IMAGE_LAYOUT_GENERAL ,
+        1
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_normalImage[m_curFrame], m_GBufferImageFormat, 
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 
+        VK_IMAGE_LAYOUT_GENERAL ,
+        1
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_depthImage[m_curFrame], VK_FORMAT_D32_SFLOAT, 
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ,
+        1
+    );
+
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssaoPipeline);
+
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssaoPipelineLayout, 0, 1, &m_ssaoDescriptorSets[m_curFrame], 0, nullptr); 
+
+    vkCmdDispatch(commandBuffer, m_extent.width / 16, m_extent.height / 16, 1);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_positionImage[m_curFrame], m_GBufferImageFormat, 
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_ACCESS_SHADER_READ_BIT, 
+        0,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL, 
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
+        1
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_normalImage[m_curFrame], m_GBufferImageFormat, 
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_ACCESS_SHADER_READ_BIT, 
+        0,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL, 
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ,
+        1
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_depthImage[m_curFrame], VK_FORMAT_D32_SFLOAT, 
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_ACCESS_SHADER_READ_BIT, 
+        0,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, 
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ,
+        1
+    );
+   
+    transitionImageLayout(commandBuffer, m_swapchainsImages[imageIndex], m_format, VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 1);
+
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = {m_renderFinishedSemaphores[m_curFrame]};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_ssaoCommandBuffer[m_curFrame];
+
+    VkSemaphore signalSemaphores[] = {m_ssaoFinishedSemaphores[m_curFrame]};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    if (vkQueueSubmit(m_graphicsAndComputeQueue, 1, &submitInfo, m_inFlightFence[m_curFrame]) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit draw command buffer!");
+    }
+}
+
+void SSAO::createSSAOPipeline()
+{
+    auto code = readFile("ssao.comp.spv");
+    auto shaderModule = createShaderModule(code);
+
+    VkPipelineShaderStageCreateInfo stage{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shaderModule,
+        .pName = "main",
+    };
+    VkComputePipelineCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = stage,
+        .layout = m_ssaoPipelineLayout,
+    };
+    vkCreateComputePipelines(m_logicDevice, VK_NULL_HANDLE, 1, &info, nullptr, &m_ssaoPipeline);
+}
+
+void SSAO::createSemaphores()
+{
+    VkSemaphoreCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+    for (size_t i = 0; i < m_framesInFlight; i++)
+    {
+        vkCreateSemaphore(m_logicDevice, &info, nullptr, &m_ssaoFinishedSemaphores[i]);
+    }
+    
 }
